@@ -1,6 +1,7 @@
 """Internal, transaction-bound user-to-user calling services. No HTTP exposure."""
 
 import hashlib
+import json
 import secrets
 from collections.abc import Callable
 from typing import Any
@@ -10,6 +11,7 @@ import frappe
 from frappe import _
 from frappe.utils import add_to_date, get_datetime, now_datetime, time_diff_in_seconds
 
+from agora_integration.services.context import normalize_metadata
 from agora_integration.services.notifications import notify
 from agora_integration.services.tokens import get_settings, issue_token
 
@@ -59,6 +61,8 @@ def serialize(call: Any, display: dict[str, str] | None = None) -> dict[str, Any
 		"duration": max(0, int(time_diff_in_seconds(end, call.started_at))) if call.started_at else 0,
 		"end_reason": call.end_reason or "",
 		"unpaid": True,
+		"purpose": getattr(call, "purpose", None) or "standard",
+		"metadata": normalize_metadata(getattr(call, "metadata", None)),
 	}
 
 
@@ -128,8 +132,23 @@ def _load(call_id: str, project: str, lock: bool = True) -> Any:
 	return call
 
 
-def start_call(project: str, recipient: str, mode: str, request_id: str, policy: Policy) -> dict[str, Any]:
+def start_call(
+	project: str,
+	recipient: str,
+	mode: str,
+	request_id: str,
+	policy: Policy,
+	*,
+	purpose: str = "standard",
+	metadata: dict[str, Any] | str | None = None,
+) -> dict[str, Any]:
 	caller = _user()
+	if purpose not in ("standard", "support", "briefing"):
+		frappe.throw(_("Invalid call purpose."))
+	try:
+		context = normalize_metadata(metadata)
+	except ValueError as error:
+		frappe.throw(str(error))
 	if mode not in ("audio", "video") or recipient == caller:
 		frappe.throw(_("Invalid call request."))
 	try:
@@ -145,7 +164,12 @@ def start_call(project: str, recipient: str, mode: str, request_id: str, policy:
 	existing = frappe.db.get_value("Agora Call Session", {"request_key": key}, "name", for_update=True)
 	if existing:
 		call = _load(existing, project)
-		if call.recipient != recipient or call.mode != mode:
+		if (
+			call.recipient != recipient
+			or call.mode != mode
+			or (getattr(call, "purpose", None) or "standard") != purpose
+			or normalize_metadata(getattr(call, "metadata", None)) != context
+		):
 			frappe.throw(_("Request UUID already belongs to another call."))
 		return serialize(call)
 	call = frappe.get_doc(
@@ -155,6 +179,8 @@ def start_call(project: str, recipient: str, mode: str, request_id: str, policy:
 			"caller": caller,
 			"recipient": recipient,
 			"mode": mode,
+			"purpose": purpose,
+			"metadata": json.dumps(context, sort_keys=True),
 			"request_key": key,
 			"channel": f"call_{uuid4().hex}",
 			"state": "Ringing",

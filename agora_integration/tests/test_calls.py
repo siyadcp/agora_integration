@@ -183,6 +183,33 @@ class CallLifecycleTests(unittest.TestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self.start()
 
+	def test_context_round_trip_and_retry_conflict(self) -> None:
+		request_id = str(uuid4())
+		metadata = {"title": "Support", "display_fields": [{"label": "Topic", "value": "Help"}]}
+		result = calls.start_call(
+			"test_calls",
+			self.users[1],
+			"video",
+			request_id,
+			lambda call, action: None,
+			purpose="support",
+			metadata=metadata,
+		)
+		self.assertEqual(result["metadata"], metadata)
+		self.assertEqual(result["purpose"], "support")
+		self.assertEqual(calls.get_call(result["id"], "test_calls")["metadata"], metadata)
+		self.assertEqual(calls.list_call_history("test_calls")[0]["purpose"], "support")
+		with self.assertRaises(frappe.ValidationError):
+			calls.start_call(
+				"test_calls",
+				self.users[1],
+				"video",
+				request_id,
+				lambda call, action: None,
+				purpose="support",
+				metadata={"title": "Changed"},
+			)
+
 	def test_accept_connect_and_end(self) -> None:
 		call = self.start()
 		frappe.set_user(self.users[1])

@@ -1,11 +1,13 @@
 {
- "doctype": "DocType", "name": "Agora Call Session", "module": "Agora Integration", "autoname": "hash",
- "field_order": ["project", "caller", "recipient", "mode", "request_key", "channel", "state", "version", "deadline", "started_at", "ended_at", "end_reason", "participants"],
+ "doctype": "DocType", "name": "Agora Call Session", "module": "Agora Integration", "autoname": "hash", "modified": "2026-10-26 12:00:00.000000",
+ "field_order": ["project", "caller", "recipient", "mode", "purpose", "metadata", "request_key", "channel", "state", "version", "deadline", "started_at", "ended_at", "end_reason", "participants"],
  "fields": [
   {"fieldname": "project", "label": "Project", "fieldtype": "Data", "reqd": 1, "search_index": 1},
   {"fieldname": "caller", "label": "Caller", "fieldtype": "Link", "options": "User", "reqd": 1, "search_index": 1},
   {"fieldname": "recipient", "label": "Recipient", "fieldtype": "Link", "options": "User", "reqd": 1, "search_index": 1},
   {"fieldname": "mode", "label": "Mode", "fieldtype": "Select", "options": "audio\nvideo", "reqd": 1},
+  {"fieldname": "purpose", "label": "Purpose", "fieldtype": "Select", "options": "standard\nsupport\nbriefing", "default": "standard", "read_only": 1},
+  {"fieldname": "metadata", "label": "Call Context", "fieldtype": "Code", "options": "JSON", "read_only": 1},
   {"fieldname": "request_key", "label": "Request Key", "fieldtype": "Data", "unique": 1, "reqd": 1},
   {"fieldname": "channel", "label": "Channel", "fieldtype": "Data", "unique": 1, "reqd": 1},
   {"fieldname": "state", "label": "State", "fieldtype": "Select", "options": "Ringing\nConnecting\nActive\nEnded\nDeclined\nCancelled\nTimed Out\nFailed", "reqd": 1, "search_index": 1},
