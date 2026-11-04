@@ -233,6 +233,10 @@ def viewer_counts(room_ids: list[str]) -> dict[str, int]:
 			& (p.lease_until > now_datetime())
 			& (u.enabled == 1)
 			& (p.registration_generation == generation)
+			& (
+				(p.entry_state == "Confirmed")
+				| ((p.entry_state == "Pending") & (p.entry_deadline > now_datetime()))
+			)
 		)
 		.groupby(p.broadcast)
 	).run(as_dict=True)
@@ -437,6 +441,8 @@ def expire_entry(room: Any, user: str) -> None:
 		)
 	):
 		_retire(room, participant, "Entry expired" if visible_state(room) != "Ended" else "Room expired")
+		if user != room.host:
+			_membership_changed(room)
 
 
 def has_permission(doc: Any, ptype: str | None = None, user: str | None = None) -> bool:
