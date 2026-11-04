@@ -164,15 +164,50 @@ def load(
 
 
 def authorized_participant(room: Any, user: str) -> Any:
-	"""Authorize nonmedia participation against the current device and lease.
+	"""Authorize nonmedia participation against current identity and admission.
 
 	The caller holds the room/user locks via load(lock=True). This does not
 	refresh media access or grant a new participation lease.
 	"""
 	participant = _participant(room, user)
-	if not participant.lease_until or get_datetime(participant.lease_until) <= now_datetime():
+	if not has_participation_access(room, participant):
 		frappe.throw(_("Enter this broadcast again to participate."), frappe.PermissionError)
 	return participant
+
+
+def has_participation_access(room: Any, participant: Any) -> bool:
+	"""Admission predicate shared with bounded host-only participant listings.
+
+	Callers hold the room lock and check current account/registration identity.
+	Pending participation is allowed, but only within its original attempt and
+	issued credential bounds. Confirmation outlives that provisional deadline;
+	chat never renews a lease, credential, or admission.
+	"""
+	current = now_datetime()
+	if (
+		visible_state(room) == "Ended"
+		or participant.broadcast != room.name
+		or not participant.active
+		or not participant.device
+		or not participant.lease_until
+		or get_datetime(participant.lease_until) <= current
+	):
+		return False
+	if participant.user == room.host:
+		return participant.registration_generation == room.host_generation
+	if (
+		not participant.attempt_id
+		or cint(participant.attempt_generation) < 1
+		or not participant.credential_app_id
+		or not participant.credential_expires_at
+	):
+		return False
+	return participant.entry_state == "Confirmed" or (
+		participant.entry_state == "Pending"
+		and bool(participant.entry_deadline)
+		and get_datetime(participant.entry_deadline) > current
+		and get_datetime(participant.credential_expires_at) > current
+	)
 
 
 def visible_state(room: Any) -> str:
