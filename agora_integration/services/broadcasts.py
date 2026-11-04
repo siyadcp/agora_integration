@@ -270,7 +270,10 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 		"host_name": frappe.db.get_value("User", room.host, "first_name") or "Host",
 		"host_uid": cint(
 			frappe.db.get_value(
-				"Agora Broadcast Participant", {"broadcast": room.name, "user": room.host}, "uid"
+				"Agora Broadcast Participant",
+				{"broadcast": room.name, "user": room.host},
+				"uid",
+				for_update=True,
 			)
 		),
 		"title": room.title,
@@ -295,6 +298,7 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 		{"broadcast": room.name, "user": user},
 		["entry_state", "attempt_id", "attempt_generation", "entry_deadline"],
 		as_dict=True,
+		for_update=True,
 	)
 	# Only this user's entry. Never fan out silent viewer identities via the room.
 	if participant and participant.entry_state:
@@ -309,12 +313,16 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 			{
 				"broadcast": room.name,
 				"participant": frappe.db.get_value(
-					"Agora Broadcast Participant", {"broadcast": room.name, "user": user}, "name"
+					"Agora Broadcast Participant",
+					{"broadcast": room.name, "user": user},
+					"name",
+					for_update=True,
 				),
 			},
 			["state", "expires_at", "last_error"],
 			as_dict=True,
 			order_by="creation desc",
+			for_update=True,
 		)
 		if removal:
 			data["entry"]["removal"] = {
@@ -405,8 +413,13 @@ def prepare(project: str, user: str, title: str, request_id: str) -> Any:
 	return room
 
 
-def join(room: Any, user: str) -> None:
-	if visible_state(room) != "Live":
+def authorized_participant_for_entry(room: Any, user: str) -> Any:
+	"""Consumer billing may bind a newly joined attempt before credentials exist."""
+	return _participant(room, user)
+
+
+def join(room: Any, user: str, *, confirmed: bool = False) -> None:
+	if visible_state(room) != "Live" and not (confirmed and visible_state(room) == "Reconnecting"):
 		frappe.throw(_("This broadcast is not accepting viewers."))
 	_no_call(user)
 	require_no_broadcast(user, room.name)
@@ -417,6 +430,8 @@ def join(room: Any, user: str) -> None:
 		participant.attempt_generation = cint(participant.attempt_generation) + 1
 		participant.entry_state = "Pending"
 		participant.entry_deadline = add_to_date(now_datetime(), seconds=30)
+	if confirmed:
+		participant.entry_state = "Confirmed"
 	participant.last_seen = now_datetime()
 	participant.lease_until = add_to_date(now_datetime(), seconds=90)
 	participant.save(ignore_permissions=True)
@@ -592,6 +607,8 @@ def _retire(room: Any, participant: Any, reason: str, *, terminal: bool = False)
 		participant.flags.ignore_links = True  # Retain missing historical identities; deny access.
 	participant.save(ignore_permissions=True)
 	request_removal(room, participant, reason)
+	for hook in frappe.get_hooks("agora_broadcast_participant_retired"):
+		frappe.get_attr(hook)(room, participant, reason)
 
 
 def expire_entry(room: Any, user: str) -> None:
