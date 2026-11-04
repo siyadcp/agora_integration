@@ -36,13 +36,44 @@ def build_rtc_token(
 		raise ValueError("Invalid Agora identifiers")
 	if not 0 < uid < 2**32 or not 60 <= ttl <= 3600 or not re.fullmatch(r"[a-zA-Z0-9_-]{1,63}", channel):
 		raise ValueError("Invalid RTC token parameters")
+	return _encode(app_id, certificate, channel, uid, ttl, (1, 2, 3, 4), issue_time, salt)
+
+
+def build_broadcast_token(
+	app_id: str, certificate: str, channel: str, uid: int, ttl: int, *, publisher: bool
+) -> str:
+	"""Audience has join only; separate short leases leave private-call defaults intact."""
+	if not all(re.fullmatch(r"[a-fA-F0-9]{32}", value) for value in (app_id, certificate)):
+		raise ValueError("Invalid Agora identifiers")
+	if (
+		type(uid) is not int
+		or type(ttl) is not int
+		or type(publisher) is not bool
+		or not 0 < uid < 2**32
+		or not 1 <= ttl <= 300
+		or not re.fullmatch(r"[a-zA-Z0-9_-]{1,63}", channel)
+	):
+		raise ValueError("Invalid broadcast token parameters")
+	return _encode(app_id, certificate, channel, uid, ttl, (1, 2, 3, 4) if publisher else (1,))
+
+
+def _encode(
+	app_id: str,
+	certificate: str,
+	channel: str,
+	uid: int,
+	ttl: int,
+	privileges: tuple[int, ...],
+	issue_time: int | None = None,
+	salt: int | None = None,
+) -> str:
 	issued = issue_time if issue_time is not None else int(time.time())
 	nonce = salt if salt is not None else secrets.randbelow(99999999) + 1
 	key = hmac.new(struct.pack("<I", issued), certificate.encode(), hashlib.sha256).digest()
 	key = hmac.new(struct.pack("<I", nonce), key, hashlib.sha256).digest()
-	# One RTC service (type 1), four publisher privileges with relative TTL.
-	service = struct.pack("<HH", 1, 4)
-	service += b"".join(struct.pack("<HI", privilege, ttl) for privilege in (1, 2, 3, 4))
+	# Join privilege expires with the token, including for already-connected clients.
+	service = struct.pack("<HH", 1, len(privileges))
+	service += b"".join(struct.pack("<HI", privilege, ttl) for privilege in privileges)
 	service += _string(channel.encode()) + _string(str(uid).encode())
 	info = _string(app_id.encode()) + struct.pack("<IIIH", issued, ttl, nonce, 1) + service
 	signature = hmac.new(key, info, hashlib.sha256).digest()
@@ -70,4 +101,18 @@ def issue_token(channel: str, uid: int) -> dict[str, Any]:
 			settings.app_id, settings.get_password("app_certificate"), channel, uid, ttl
 		),
 		"expires_at": int(time.time()) + ttl,
+	}
+
+
+def issue_broadcast_token(channel: str, uid: int, *, publisher: bool, ttl: int = 30) -> dict[str, Any]:
+	settings = get_settings()
+	return {
+		"app_id": settings.app_id,
+		"channel": channel,
+		"uid": uid,
+		"token": build_broadcast_token(
+			settings.app_id, settings.get_password("app_certificate"), channel, uid, ttl, publisher=publisher
+		),
+		"expires_at": int(time.time()) + ttl,
+		"publisher": publisher,
 	}

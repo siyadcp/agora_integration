@@ -1,0 +1,20 @@
+{
+ "doctype": "DocType", "name": "Agora Broadcast", "module": "Agora Integration",
+ "autoname": "hash", "creation": "2026-11-04 01:00:00.000000", "modified": "2026-11-04 04:00:00.000000",
+ "field_order": ["project", "host", "host_generation", "request_key", "channel", "state", "title", "cover_image", "started_at", "ended_at", "deadline", "version"],
+ "fields": [
+  {"fieldname": "project", "fieldtype": "Data", "label": "Project", "reqd": 1},
+  {"fieldname": "host", "fieldtype": "Link", "options": "User", "label": "Host", "reqd": 1, "search_index": 1},
+  {"fieldname": "host_generation", "fieldtype": "Int", "label": "Host registration generation", "reqd": 1},
+  {"fieldname": "request_key", "fieldtype": "Data", "label": "Request key", "unique": 1, "reqd": 1},
+  {"fieldname": "channel", "fieldtype": "Data", "label": "Channel", "unique": 1, "reqd": 1},
+  {"fieldname": "state", "fieldtype": "Select", "options": "Preparing\nLive\nEnded", "label": "State", "default": "Preparing", "reqd": 1, "search_index": 1},
+  {"fieldname": "title", "fieldtype": "Data", "label": "Title", "reqd": 1},
+  {"fieldname": "cover_image", "fieldtype": "Attach Image", "label": "Cover image"},
+  {"fieldname": "started_at", "fieldtype": "Datetime", "label": "Started at"},
+  {"fieldname": "ended_at", "fieldtype": "Datetime", "label": "Ended at"},
+  {"fieldname": "deadline", "fieldtype": "Datetime", "label": "Host lease deadline", "reqd": 1},
+  {"fieldname": "version", "fieldtype": "Int", "label": "Version", "default": "1"}
+ ],
+ "permissions": [{"role": "System Manager", "read": 1}, {"role": "All", "read": 1}], "sort_field": "creation", "sort_order": "DESC"
+}
