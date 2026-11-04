@@ -541,6 +541,18 @@ def leave(room: Any, user: str, *, end: bool = False) -> None:
 		_membership_changed(room)
 
 
+def retire_viewer(room: Any, participant: Any, reason: str) -> None:
+	"""Retire room-bound access under the caller's room lock, without billing.
+
+	Policy authorization belongs to the owning application. No device binding
+	is required for a host's moderation of another participant.
+	"""
+	if participant.broadcast != room.name or participant.user == room.host:
+		frappe.throw(_("Choose a viewer in this broadcast."), frappe.PermissionError)
+	_retire(room, participant, reason)
+	_membership_changed(room)
+
+
 def terminate(room: Any) -> None:
 	"""Caller owns policy authorization and the room lock; no host identity needed.
 
