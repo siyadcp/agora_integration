@@ -26,6 +26,19 @@ verification or authorization to enable paid admission.
   may cause another positive-duration ban for the same retired channel/UID.
   That duplicate is restrictive and bounded, not an access grant. Rule expiry
   is automatic; this path never deletes bans or bans an entire shared project.
+- UID allocation uses current reads of both participation and durable retirement
+  records under the room lock, not an earlier request snapshot. Retirement rows
+  must be retained for the broadcast's lifetime; do not purge them while the
+  channel can still issue credentials.
+- GET reconciliation is best-effort. The official [ban-list reference](https://docs.agora.io/en/api-reference/api-ref/rtc/get-ban-rule-list.md)
+  describes `ts` as a UTC expiry string but its example uses `{}`; it does not
+  guarantee ISO formatting. We recognize only full timestamps that parse safely,
+  and require matching project/channel/numeric UID, no IP restriction, join-ban
+  privileges, a valid rule ID and sufficient remaining expiry before reusing an
+  acknowledgement. Unrecognized/malformed/expired rules or failed GETs do not
+  starve bounded repeated POSTs for the same permanently retired channel/UID.
+  POST acknowledgements are validated too. No response bodies or HTTP exception
+  details are logged. This parsing policy is not live provider-shape evidence.
 
 ## Runtime secrets and disabled provider adapter
 

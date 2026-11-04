@@ -94,9 +94,7 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 				doc.entry_state = ""
 				# Never reuse a UID with outstanding old credentials or ban rules.
 				doc.uid = secrets.randbelow(2**31 - 1) + 1
-				while frappe.db.exists(
-					"Agora Broadcast Removal", {"broadcast": room.name, "uid": doc.uid}
-				) or frappe.db.exists("Agora Broadcast Participant", {"rtc_key": f"{room.name}:{doc.uid}"}):
+				while _uid_in_use(room, doc.uid):
 					doc.uid = secrets.randbelow(2**31 - 1) + 1
 				doc.rtc_key = f"{room.name}:{doc.uid}"
 				doc.credential_expires_at = None
@@ -108,9 +106,7 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 	if not create:
 		frappe.throw(_("Join this broadcast before requesting media access."), frappe.PermissionError)
 	uid = secrets.randbelow(2**31 - 1) + 1
-	while frappe.db.exists(
-		"Agora Broadcast Participant", {"rtc_key": f"{room.name}:{uid}"}
-	) or frappe.db.exists("Agora Broadcast Removal", {"broadcast": room.name, "uid": uid}):
+	while _uid_in_use(room, uid):
 		uid = secrets.randbelow(2**31 - 1) + 1
 	return frappe.get_doc(
 		{
@@ -124,6 +120,20 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 			"registration_generation": _generation(user),
 			"active": 1,
 		}
+	)
+
+
+def _uid_in_use(room: Any, uid: int) -> bool:
+	# Caller holds the stable room lock. A request's earlier consistent-read
+	# snapshot may predate issuance AND retirement by another serialized request.
+	# Both lookups must be current reads, including permanently retired UIDs.
+	return bool(
+		frappe.db.get_value(
+			"Agora Broadcast Removal", {"removal_key": f"{room.name}:{uid}"}, "name", for_update=True
+		)
+		or frappe.db.get_value(
+			"Agora Broadcast Participant", {"rtc_key": f"{room.name}:{uid}"}, "name", for_update=True
+		)
 	)
 
 

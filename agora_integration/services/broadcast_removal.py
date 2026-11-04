@@ -7,6 +7,7 @@ UIDs are never reused. ProviderAccepted means acknowledgement, not device proof.
 """
 
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -53,31 +54,21 @@ def ban(app_id: str, channel: str, uid: int, seconds: int, *, recovering: bool =
 		# Recover a lost POST acknowledgement before creating another restriction.
 		# GET may omit rules under network trouble; a repeated positive-duration
 		# ban remains safe because this channel/UID is permanently retired.
-		response = requests.get(
-			"https://api.agora.io/dev/v1/kicking-rule",
-			auth=auth,
-			params={"appid": app_id},
-			timeout=20,
-			allow_redirects=False,
-		)
-		response.raise_for_status()
-		data = response.json()
-		if data.get("status") != "success":
-			raise RuntimeError("Provider reconciliation unconfirmed")
-		for rule in data.get("rules", []):
-			if (
-				rule.get("appid") == app_id
-				and rule.get("cname") == channel
-				and rule.get("uid") == uid
-				and not rule.get("ip")
-				and "join_channel" in rule.get("privileges", [])
-				and str(rule.get("id", "")).isdigit()
-			):
-				expiry = datetime.fromisoformat(rule["ts"].replace("Z", "+00:00"))
-				if expiry.tzinfo is None:
-					expiry = expiry.replace(tzinfo=UTC)
-				if expiry >= datetime.now(UTC) + timedelta(seconds=seconds - 10):
-					return str(rule["id"])
+		try:
+			response = requests.get(
+				"https://api.agora.io/dev/v1/kicking-rule",
+				auth=auth,
+				params={"appid": app_id},
+				timeout=20,
+				allow_redirects=False,
+			)
+			data = response.json() if response.status_code == 200 else None
+		except requests.RequestException, ValueError:
+			data = None  # GET uncertainty must not permanently starve safe POST retries.
+		if isinstance(data, dict) and data.get("status") == "success" and isinstance(data.get("rules"), list):
+			for rule in data["rules"]:
+				if rule_id := _covering_rule(rule, app_id, channel, uid, seconds):
+					return rule_id
 	response = requests.post(
 		"https://api.agora.io/dev/v1/kicking-rule",
 		auth=auth,
@@ -94,9 +85,51 @@ def ban(app_id: str, channel: str, uid: int, seconds: int, *, recovering: bool =
 	if response.status_code != 200:
 		raise RuntimeError("Provider did not acknowledge removal")
 	data = response.json()
-	if data.get("status") != "success" or not str(data.get("id", "")).isdigit():
+	if not isinstance(data, dict) or data.get("status") != "success" or not _rule_id(data.get("id")):
 		raise RuntimeError("Provider did not acknowledge a rule identity")
 	return str(data["id"])
+
+
+def _rule_id(value: Any) -> str | None:
+	if type(value) is int and value > 0:
+		return str(value)
+	if isinstance(value, str) and len(value) <= 20 and re.fullmatch(r"[0-9]+", value) and int(value) > 0:
+		return value
+	return None
+
+
+def _covering_rule(rule: Any, app_id: str, channel: str, uid: int, seconds: int) -> str | None:
+	if not isinstance(rule, dict) or not (
+		rule.get("appid") == app_id
+		and rule.get("cname") == channel
+		and type(rule.get("uid")) is int
+		and rule["uid"] == uid
+		and rule.get("ip") in (None, "")
+		and isinstance(rule.get("privileges"), list)
+		and "join_channel" in rule["privileges"]
+		and all(p in ("join_channel", "publish_audio", "publish_video") for p in rule["privileges"])
+		and _rule_id(rule.get("id"))
+	):
+		return None
+	# Docs say UTC expiry string, without guaranteeing a wire format (example
+	# even shows {}). Recognize only full timestamps we can interpret safely;
+	# this is best-effort parsing, not a claim of an ISO provider contract.
+	ts = rule.get("ts")
+	if not isinstance(ts, str) or not re.fullmatch(
+		r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}"
+		r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})?",
+		ts,
+	):
+		return None
+	try:
+		expiry = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+		if expiry.tzinfo is None:
+			expiry = expiry.replace(tzinfo=UTC)  # UTC is documented, syntax is not.
+		if expiry >= datetime.now(UTC) + timedelta(seconds=seconds):
+			return _rule_id(rule["id"])
+	except ValueError, OverflowError:
+		pass  # Unknown expiry: repeat only the bounded, retired-UID restriction.
+	return None
 
 
 def enforce(removal_id: str) -> None:
