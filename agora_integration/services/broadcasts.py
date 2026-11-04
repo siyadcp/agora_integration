@@ -535,32 +535,49 @@ def leave(room: Any, user: str, *, end: bool = False) -> None:
 	if end and room.host != user:
 		frappe.throw(_("Only the host can end the broadcast."), frappe.PermissionError)
 	if room.host == user:
-		if room.state != "Ended":
-			room.state, room.ended_at = "Ended", now_datetime()
-			room.version = cint(room.version) + 1
-			room.save(ignore_permissions=True)
-		# The room lock serializes joins, but does not refresh an earlier RR
-		# snapshot. Enumerate with a current read, not just current row loads.
-		for row in frappe.qb.get_query(
-			"Agora Broadcast Participant",
-			filters={"broadcast": room.name},
-			fields=["name"],
-			for_update=True,
-		).run(as_dict=True):
-			_retire(
-				room, frappe.get_doc("Agora Broadcast Participant", row.name, for_update=True), "Room ended"
-			)
+		terminate(room)
 	else:
 		_retire(room, participant, "Viewer left")
 		_membership_changed(room)
 
 
-def _retire(room: Any, participant: Any, reason: str) -> None:
+def terminate(room: Any) -> None:
+	"""Caller owns policy authorization and the room lock; no host identity needed.
+
+	Shared seam for host end, Sync moderation and future viewer-ban integration.
+	Durable retirement delegates to ticket05's after-commit removal intents.
+	"""
+	if room.state != "Ended":
+		room.state, room.ended_at = "Ended", now_datetime()
+		room.version = cint(room.version) + 1
+		# Terminal repair must work for retained records whose User disappeared.
+		# This never grants access or rewrites historical links.
+		room.flags.ignore_links = True
+		room.save(ignore_permissions=True)
+	# The room lock serializes joins, but does not refresh an earlier RR
+	# snapshot. Enumerate with a current read, not just current row loads.
+	for row in frappe.qb.get_query(
+		"Agora Broadcast Participant",
+		filters={"broadcast": room.name},
+		fields=["name"],
+		for_update=True,
+	).run(as_dict=True):
+		_retire(
+			room,
+			frappe.get_doc("Agora Broadcast Participant", row.name, for_update=True),
+			"Room ended",
+			terminal=True,
+		)
+
+
+def _retire(room: Any, participant: Any, reason: str, *, terminal: bool = False) -> None:
 	from agora_integration.services.broadcast_removal import request_removal
 
 	participant.active = 0
 	if participant.entry_state == "Pending":
 		participant.entry_state = "Failed"
+	if terminal:
+		participant.flags.ignore_links = True  # Retain missing historical identities; deny access.
 	participant.save(ignore_permissions=True)
 	request_removal(room, participant, reason)
 
