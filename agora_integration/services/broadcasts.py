@@ -2,12 +2,21 @@
 
 import hashlib
 import secrets
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import frappe
 from frappe import _
-from frappe.utils import add_to_date, cint, get_datetime, now_datetime
+from frappe.utils import (
+	add_to_date,
+	cint,
+	convert_utc_to_system_timezone,
+	get_datetime,
+	get_system_timezone,
+	now_datetime,
+)
 
 from agora_integration.services.tokens import get_settings, issue_broadcast_token
 
@@ -88,6 +97,17 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 		):
 			frappe.throw(_("Enter the broadcast again to obtain access."), frappe.PermissionError)
 		if create:
+			if doc.device != current_device() or doc.registration_generation != _generation(user):
+				_retire(room, doc, "Device or registration changed")
+			if not doc.active:
+				doc.entry_state = ""
+				# Never reuse a UID with outstanding old credentials or ban rules.
+				doc.uid = secrets.randbelow(2**31 - 1) + 1
+				while _uid_in_use(room, doc.uid):
+					doc.uid = secrets.randbelow(2**31 - 1) + 1
+				doc.rtc_key = f"{room.name}:{doc.uid}"
+				doc.credential_expires_at = None
+				doc.credential_app_id = None
 			doc.device = current_device()
 			doc.registration_generation = _generation(user)
 			doc.active = 1
@@ -95,9 +115,7 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 	if not create:
 		frappe.throw(_("Join this broadcast before requesting media access."), frappe.PermissionError)
 	uid = secrets.randbelow(2**31 - 1) + 1
-	while frappe.db.get_value(
-		"Agora Broadcast Participant", {"rtc_key": f"{room.name}:{uid}"}, "name", for_update=True
-	):
+	while _uid_in_use(room, uid):
 		uid = secrets.randbelow(2**31 - 1) + 1
 	return frappe.get_doc(
 		{
@@ -111,6 +129,20 @@ def _participant(room: Any, user: str, *, create: bool = False, require_active: 
 			"registration_generation": _generation(user),
 			"active": 1,
 		}
+	)
+
+
+def _uid_in_use(room: Any, uid: int) -> bool:
+	# Caller holds the stable room lock. A request's earlier consistent-read
+	# snapshot may predate issuance AND retirement by another serialized request.
+	# Both lookups must be current reads, including permanently retired UIDs.
+	return bool(
+		frappe.db.get_value(
+			"Agora Broadcast Removal", {"removal_key": f"{room.name}:{uid}"}, "name", for_update=True
+		)
+		or frappe.db.get_value(
+			"Agora Broadcast Participant", {"rtc_key": f"{room.name}:{uid}"}, "name", for_update=True
+		)
 	)
 
 
@@ -151,12 +183,24 @@ def _transition(room: Any, **values: Any) -> None:
 def expire(room: Any) -> None:
 	"""Caller holds the room lock. Missed heartbeats cannot mint a fresh window."""
 	state = visible_state(room)
-	if state == room.state:
+	if state == room.state and state != "Ended":
 		return
 	if state == "Reconnecting":
 		_transition(room, state=state, deadline=add_to_date(room.deadline, seconds=RECOVERY_SECONDS))
 	else:
-		_transition(room, state="Ended", ended_at=now_datetime())
+		if room.state != "Ended":
+			_transition(room, state="Ended", ended_at=now_datetime())
+		# A read can persist terminal recovery before the minute sweep. Retire all
+		# credentials here, including omissions persisted by older end requests.
+		for row in frappe.qb.get_query(
+			"Agora Broadcast Participant",
+			filters={"broadcast": room.name, "active": 1},
+			fields=["name"],
+			for_update=True,
+		).run(as_dict=True):
+			_retire(
+				room, frappe.get_doc("Agora Broadcast Participant", row.name, for_update=True), "Room expired"
+			)
 
 
 def interrupt(room: Any, user: str) -> None:
@@ -171,8 +215,9 @@ def interrupt(room: Any, user: str) -> None:
 
 
 def serialize(room: Any, user: str) -> dict[str, Any]:
+	expire_entry(room, user)
 	state = visible_state(room)
-	return {
+	data = {
 		"id": room.name,
 		"host": room.host,
 		"host_name": frappe.db.get_value("User", room.host, "first_name") or "Host",
@@ -198,6 +243,39 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 		"ended_at": str(room.ended_at or ""),
 		"joining_fee": "0",
 	}
+	participant = frappe.db.get_value(
+		"Agora Broadcast Participant",
+		{"broadcast": room.name, "user": user},
+		["entry_state", "attempt_id", "attempt_generation", "entry_deadline"],
+		as_dict=True,
+	)
+	# Only this user's entry. Never fan out silent viewer identities via the room.
+	if participant and participant.entry_state:
+		data["entry"] = {
+			"state": participant.entry_state,
+			"attempt_id": participant.attempt_id,
+			"generation": participant.attempt_generation,
+			"deadline": str(participant.entry_deadline),
+		}
+		removal = frappe.db.get_value(
+			"Agora Broadcast Removal",
+			{
+				"broadcast": room.name,
+				"participant": frappe.db.get_value(
+					"Agora Broadcast Participant", {"broadcast": room.name, "user": user}, "name"
+				),
+			},
+			["state", "expires_at", "last_error"],
+			as_dict=True,
+			order_by="creation desc",
+		)
+		if removal:
+			data["entry"]["removal"] = {
+				"state": removal.state,
+				"credential_expires_at": str(removal.expires_at),
+				"error": removal.last_error or "",
+			}
+	return data
 
 
 def viewer_counts(room_ids: list[str]) -> dict[str, int]:
@@ -230,6 +308,10 @@ def viewer_counts(room_ids: list[str]) -> dict[str, int]:
 			& (p.lease_until > now_datetime())
 			& (u.enabled == 1)
 			& (p.registration_generation == generation)
+			& (
+				(p.entry_state == "Confirmed")
+				| ((p.entry_state == "Pending") & (p.entry_deadline > now_datetime()))
+			)
 		)
 		.groupby(p.broadcast)
 	).run(as_dict=True)
@@ -281,7 +363,13 @@ def join(room: Any, user: str) -> None:
 		frappe.throw(_("This broadcast is not accepting viewers."))
 	_no_call(user)
 	require_no_broadcast(user, room.name)
+	expire_entry(room, user)
 	participant = _participant(room, user, create=True)
+	if not participant.entry_state or not participant.active:
+		participant.attempt_id = uuid4().hex
+		participant.attempt_generation = cint(participant.attempt_generation) + 1
+		participant.entry_state = "Pending"
+		participant.entry_deadline = add_to_date(now_datetime(), seconds=30)
 	participant.last_seen = now_datetime()
 	participant.lease_until = add_to_date(now_datetime(), seconds=90)
 	participant.save(ignore_permissions=True)
@@ -302,6 +390,14 @@ def credentials(room: Any, user: str) -> dict[str, Any]:
 	if visible_state(room) == "Ended":
 		frappe.throw(_("This broadcast has ended."))
 	participant = _participant(room, user)
+	if user != room.host and not participant.entry_state:
+		frappe.throw(_("Enter the broadcast again to obtain access."), frappe.PermissionError)
+	if participant.entry_state == "Failed" or (
+		user != room.host
+		and participant.entry_state == "Pending"
+		and get_datetime(participant.entry_deadline) <= now_datetime()
+	):
+		frappe.throw(_("This admission attempt has expired."))
 	_no_call(user)
 	require_no_broadcast(user, room.name)
 	if room.state == "Preparing" and room.host != user:
@@ -313,21 +409,72 @@ def credentials(room: Any, user: str) -> dict[str, Any]:
 		room.deadline = add_to_date(now_datetime(), seconds=90)
 		# Lease refresh is internal; do not fan out a room reload every heartbeat.
 		frappe.db.set_value("Agora Broadcast", room.name, "deadline", room.deadline, update_modified=False)
-	ttl = (
-		min(90, max(1, int((get_datetime(room.deadline) - now_datetime()).total_seconds())))
-		if room.state == "Reconnecting"
-		else 90
+	ttl = 90
+	not_after = None
+	# Independent absolute bounds: renewal can shorten a lease, never restart
+	# either the recovery window or a provisional admission attempt.
+	bounds = []
+	if room.state == "Reconnecting":
+		bounds.append(get_datetime(room.deadline))
+	if user != room.host and participant.entry_state == "Pending":
+		bounds.append(get_datetime(participant.entry_deadline))
+	if bounds:
+		deadline = min(bounds)
+		not_after = int(deadline.replace(tzinfo=ZoneInfo(get_system_timezone())).timestamp())
+		ttl = min(ttl, int((deadline - now_datetime()).total_seconds()))
+		if ttl < 1:
+			frappe.throw(_("This admission attempt has expired."))
+	token = issue_broadcast_token(
+		room.channel, cint(participant.uid), publisher=user == room.host, ttl=ttl, not_after=not_after
 	)
-	return issue_broadcast_token(room.channel, cint(participant.uid), publisher=user == room.host, ttl=ttl)
+	if participant.credential_app_id and participant.credential_app_id != token["app_id"]:
+		frappe.throw(_("Leave this broadcast before changing media configuration."))
+	participant.credential_app_id = token["app_id"]
+	expires_at = convert_utc_to_system_timezone(datetime.fromtimestamp(token["expires_at"], UTC)).replace(
+		tzinfo=None
+	)
+	participant.credential_expires_at = max(
+		expires_at,
+		get_datetime(participant.credential_expires_at) if participant.credential_expires_at else expires_at,
+	)
+	participant.save(ignore_permissions=True)
+	if user != room.host:
+		token.update(
+			attempt_id=participant.attempt_id,
+			generation=participant.attempt_generation,
+			entry_deadline=str(participant.entry_deadline),
+		)
+	return token
+
+
+def report_first_frame(room: Any, user: str, attempt_id: str, generation: Any, uid: Any) -> None:
+	"""Authenticated app observation, NOT provider attestation; a modified app can lie."""
+	participant = _participant(room, user)
+	if (
+		user == room.host
+		or participant.attempt_id != attempt_id
+		or str(participant.attempt_generation) != str(generation)
+		or str(participant.uid) != str(uid)
+		or not participant.credential_expires_at
+	):
+		frappe.throw(_("This playback report does not match your admission."), frappe.PermissionError)
+	if visible_state(room) != "Live" or participant.entry_state == "Failed":
+		frappe.throw(_("This admission attempt is unavailable."))
+	if participant.entry_state == "Confirmed":
+		return  # Idempotent acknowledgement, never extends credentials or deadline.
+	if get_datetime(participant.entry_deadline) <= now_datetime():
+		frappe.throw(_("This admission attempt has expired."))
+	participant.entry_state = "Confirmed"
+	participant.save(ignore_permissions=True)
 
 
 def activate(room: Any, user: str) -> None:
 	if user != room.host:
 		frappe.throw(_("Only the host can start the broadcast."), frappe.PermissionError)
-	_participant(room, user)
 	expire(room)
 	if visible_state(room) == "Ended":
 		frappe.throw(_("This broadcast has ended."))
+	_participant(room, user)
 	if room.state == "Live":
 		return
 	room.state, room.started_at = "Live", room.started_at or now_datetime()
@@ -345,11 +492,50 @@ def leave(room: Any, user: str, *, end: bool = False) -> None:
 			room.state, room.ended_at = "Ended", now_datetime()
 			room.version = cint(room.version) + 1
 			room.save(ignore_permissions=True)
+		# The room lock serializes joins, but does not refresh an earlier RR
+		# snapshot. Enumerate with a current read, not just current row loads.
+		for row in frappe.qb.get_query(
+			"Agora Broadcast Participant",
+			filters={"broadcast": room.name},
+			fields=["name"],
+			for_update=True,
+		).run(as_dict=True):
+			_retire(
+				room, frappe.get_doc("Agora Broadcast Participant", row.name, for_update=True), "Room ended"
+			)
 	else:
-		# The existing bearer token remains a bounded lease; do not claim instant revocation.
-		participant.active = 0
-		participant.save(ignore_permissions=True)
+		_retire(room, participant, "Viewer left")
 		_membership_changed(room)
+
+
+def _retire(room: Any, participant: Any, reason: str) -> None:
+	from agora_integration.services.broadcast_removal import request_removal
+
+	participant.active = 0
+	if participant.entry_state == "Pending":
+		participant.entry_state = "Failed"
+	participant.save(ignore_permissions=True)
+	request_removal(room, participant, reason)
+
+
+def expire_entry(room: Any, user: str) -> None:
+	# Caller holds the room lock; the participant may postdate its RR snapshot.
+	name = frappe.db.get_value(
+		"Agora Broadcast Participant", {"broadcast": room.name, "user": user}, "name", for_update=True
+	)
+	if not name:
+		return
+	participant = frappe.get_doc("Agora Broadcast Participant", name, for_update=True)
+	if participant.active and (
+		visible_state(room) == "Ended"
+		or (
+			participant.entry_state == "Pending"
+			and get_datetime(participant.entry_deadline) <= now_datetime()
+		)
+	):
+		_retire(room, participant, "Entry expired" if visible_state(room) != "Ended" else "Room expired")
+		if user != room.host:
+			_membership_changed(room)
 
 
 def has_permission(doc: Any, ptype: str | None = None, user: str | None = None) -> bool:

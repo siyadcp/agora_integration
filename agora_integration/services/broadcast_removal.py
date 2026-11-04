@@ -1,0 +1,178 @@
+"""Durable channel/UID bans, never a claim of instantaneous token revocation.
+
+REST customer credentials are runtime-only and distinct from App Certificate.
+Positive-duration retry bans are monotone: a lost response may create another
+short-lived rule for the SAME retired UID/channel, never widen access. Retired
+UIDs are never reused. ProviderAccepted means acknowledgement, not device proof.
+"""
+
+import math
+import re
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import frappe
+import requests
+from frappe.utils import cint, get_datetime, now_datetime
+
+
+def request_removal(room: Any, participant: Any, reason: str) -> None:
+	if not participant.credential_expires_at or not participant.credential_app_id:
+		return
+	key = f"{room.name}:{participant.uid}"
+	# Room locking serializes retirement, but does not refresh an earlier RR
+	# snapshot. A duplicate end/retry must observe an already committed intent.
+	if frappe.db.get_value("Agora Broadcast Removal", {"removal_key": key}, "name", for_update=True):
+		return
+	doc = frappe.get_doc(
+		{
+			"doctype": "Agora Broadcast Removal",
+			"removal_key": key,
+			"broadcast": room.name,
+			"participant": participant.name,
+			"app_id": participant.credential_app_id,
+			"channel": room.channel,
+			"uid": participant.uid,
+			"expires_at": participant.credential_expires_at,
+			"reason": reason,
+			"state": "Pending",
+		}
+	).insert(ignore_permissions=True)
+	frappe.enqueue(
+		"agora_integration.services.broadcast_removal.enforce", removal_id=doc.name, enqueue_after_commit=True
+	)
+
+
+def ban(app_id: str, channel: str, uid: int, seconds: int, *, recovering: bool = False) -> str:
+	"""Only called by background work. Never log HTTP exceptions or responses."""
+	if not (
+		cint(frappe.conf.get("agora_broadcast_removal_enabled"))
+		and frappe.conf.get("agora_rest_customer_id")
+		and frappe.conf.get("agora_rest_customer_secret")
+	):
+		raise RuntimeError("Provider removal is not configured")
+	auth = (frappe.conf.agora_rest_customer_id, frappe.conf.agora_rest_customer_secret)
+	if recovering:
+		# Recover a lost POST acknowledgement before creating another restriction.
+		# GET may omit rules under network trouble; a repeated positive-duration
+		# ban remains safe because this channel/UID is permanently retired.
+		try:
+			response = requests.get(
+				"https://api.agora.io/dev/v1/kicking-rule",
+				auth=auth,
+				params={"appid": app_id},
+				timeout=20,
+				allow_redirects=False,
+			)
+			data = response.json() if response.status_code == 200 else None
+		except requests.RequestException, ValueError:
+			data = None  # GET uncertainty must not permanently starve safe POST retries.
+		if isinstance(data, dict) and data.get("status") == "success" and isinstance(data.get("rules"), list):
+			for rule in data["rules"]:
+				if rule_id := _covering_rule(rule, app_id, channel, uid, seconds):
+					return rule_id
+	response = requests.post(
+		"https://api.agora.io/dev/v1/kicking-rule",
+		auth=auth,
+		json={
+			"appid": app_id,
+			"cname": channel,
+			"uid": uid,
+			"time_in_seconds": max(10, seconds),
+			"privileges": ["join_channel"],
+		},
+		timeout=20,
+		allow_redirects=False,
+	)
+	if response.status_code != 200:
+		raise RuntimeError("Provider did not acknowledge removal")
+	data = response.json()
+	if not isinstance(data, dict) or data.get("status") != "success" or not _rule_id(data.get("id")):
+		raise RuntimeError("Provider did not acknowledge a rule identity")
+	return str(data["id"])
+
+
+def _rule_id(value: Any) -> str | None:
+	if type(value) is int and value > 0:
+		return str(value)
+	if isinstance(value, str) and len(value) <= 20 and re.fullmatch(r"[0-9]+", value) and int(value) > 0:
+		return value
+	return None
+
+
+def _covering_rule(rule: Any, app_id: str, channel: str, uid: int, seconds: int) -> str | None:
+	if not isinstance(rule, dict) or not (
+		rule.get("appid") == app_id
+		and rule.get("cname") == channel
+		and type(rule.get("uid")) is int
+		and rule["uid"] == uid
+		and rule.get("ip") in (None, "")
+		and isinstance(rule.get("privileges"), list)
+		and "join_channel" in rule["privileges"]
+		and all(p in ("join_channel", "publish_audio", "publish_video") for p in rule["privileges"])
+		and _rule_id(rule.get("id"))
+	):
+		return None
+	# Docs say UTC expiry string, without guaranteeing a wire format (example
+	# even shows {}). Recognize only full timestamps we can interpret safely;
+	# this is best-effort parsing, not a claim of an ISO provider contract.
+	ts = rule.get("ts")
+	if not isinstance(ts, str) or not re.fullmatch(
+		r"[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}"
+		r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})?",
+		ts,
+	):
+		return None
+	try:
+		expiry = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+		if expiry.tzinfo is None:
+			expiry = expiry.replace(tzinfo=UTC)  # UTC is documented, syntax is not.
+		if expiry >= datetime.now(UTC) + timedelta(seconds=seconds):
+			return _rule_id(rule["id"])
+	except ValueError, OverflowError:
+		pass  # Unknown expiry: repeat only the bounded, retired-UID restriction.
+	return None
+
+
+def enforce(removal_id: str) -> None:
+	doc = frappe.get_doc("Agora Broadcast Removal", removal_id, for_update=True)
+	if doc.state in ("ProviderAccepted", "Expired"):
+		return
+	remaining = math.ceil((get_datetime(doc.expires_at) - now_datetime()).total_seconds())
+	if remaining <= 0:
+		doc.state = "Expired"  # Credential bound elapsed; NOT observed provider removal.
+	else:
+		doc.attempts = cint(doc.attempts) + 1
+		try:
+			doc.rule_id = ban(
+				doc.app_id, doc.channel, cint(doc.uid), remaining + 10, recovering=doc.attempts > 1
+			)
+			doc.state, doc.observed_at, doc.last_error = "ProviderAccepted", now_datetime(), ""
+		except Exception:
+			# Includes timeouts/lost responses: outcome unknown. Retrying only adds
+			# the same bounded restriction. No secrets/response bodies/URLs in logs.
+			doc.state, doc.last_error = (
+				"Failed",
+				"Provider removal unconfirmed; retry pending credential expiry.",
+			)
+	# Outside the exception handler: telemetry must not capture the HTTP exception
+	# (which can hold authentication headers or raw provider response bodies).
+	if doc.state == "Failed":
+		frappe.log_error(
+			title="Broadcast removal unconfirmed",
+			message=f"Removal {doc.name}: outcome unconfirmed; reconciliation will retry until credential expiry.",
+		)
+	doc.save(ignore_permissions=True)
+
+
+def reconcile() -> None:
+	for name in frappe.get_all(
+		"Agora Broadcast Removal",
+		filters={"state": ["in", ["Pending", "Failed"]]},
+		pluck="name",
+		limit_page_length=500,
+		order_by="modified asc",
+	):
+		frappe.enqueue(
+			"agora_integration.services.broadcast_removal.enforce", removal_id=name, enqueue_after_commit=True
+		)

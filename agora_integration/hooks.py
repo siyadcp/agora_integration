@@ -9,7 +9,10 @@ required_apps = ["flutter_utils"]
 after_install = "agora_integration.install.after_install"
 scheduler_events = {
 	"cron": {
-		"* * * * *": ["agora_integration.tasks.expire_calls", "agora_integration.tasks.expire_broadcasts"]
+		"* * * * *": [
+			"agora_integration.tasks.expire_calls",
+			"agora_integration.tasks.expire_broadcast_access",
+		]
 	}
 }
 has_permission = {"Agora Broadcast": "agora_integration.services.broadcasts.has_permission"}

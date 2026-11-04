@@ -1,0 +1,20 @@
+{
+ "doctype": "DocType", "name": "Agora Broadcast Removal", "module": "Agora Integration", "autoname": "hash",
+ "field_order": ["removal_key", "broadcast", "participant", "app_id", "channel", "uid", "reason", "expires_at", "state", "rule_id", "attempts", "last_error", "observed_at"],
+ "fields": [
+  {"fieldname": "removal_key", "label": "Credential identity", "fieldtype": "Data", "unique": 1, "reqd": 1},
+  {"fieldname": "broadcast", "label": "Broadcast", "fieldtype": "Link", "options": "Agora Broadcast", "reqd": 1},
+  {"fieldname": "participant", "label": "Participant", "fieldtype": "Link", "options": "Agora Broadcast Participant", "reqd": 1},
+  {"fieldname": "app_id", "label": "Credential project", "fieldtype": "Data", "reqd": 1},
+  {"fieldname": "channel", "label": "Channel", "fieldtype": "Data", "reqd": 1},
+  {"fieldname": "uid", "label": "RTC UID", "fieldtype": "Int", "reqd": 1},
+  {"fieldname": "reason", "label": "Reason", "fieldtype": "Data"},
+  {"fieldname": "expires_at", "label": "Credential expiry bound", "fieldtype": "Datetime", "reqd": 1},
+  {"fieldname": "state", "label": "Enforcement state", "fieldtype": "Select", "options": "Pending\nProviderAccepted\nFailed\nExpired", "default": "Pending", "reqd": 1},
+  {"fieldname": "rule_id", "label": "Provider rule", "fieldtype": "Data"},
+  {"fieldname": "attempts", "label": "Attempts", "fieldtype": "Int"},
+  {"fieldname": "last_error", "label": "Safe failure summary", "fieldtype": "Data"},
+  {"fieldname": "observed_at", "label": "Provider acknowledgement at", "fieldtype": "Datetime"}
+ ],
+ "permissions": [{"role": "System Manager", "read": 1}]
+}
