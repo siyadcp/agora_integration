@@ -140,21 +140,47 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 		"state": state,
 		"is_host": user == room.host,
 		"version": cint(room.version),
-		"viewer_count": frappe.db.count(
-			"Agora Broadcast Participant",
-			{
-				"broadcast": room.name,
-				"active": 1,
-				"user": ["!=", room.host],
-				"lease_until": [">", now_datetime()],
-			},
-		)
-		if state == "Live"
-		else 0,
+		"viewer_count": viewer_counts([room.name]).get(room.name, 0) if state == "Live" else 0,
 		"started_at": str(room.started_at or ""),
 		"ended_at": str(room.ended_at or ""),
 		"joining_fee": "0",
 	}
+
+
+def viewer_counts(room_ids: list[str]) -> dict[str, int]:
+	"""Aggregate current audience leases without exposing participant identities."""
+	if not room_ids:
+		return {}
+	from frappe.query_builder.functions import Count
+
+	p = frappe.qb.DocType("Agora Broadcast Participant")
+	r = frappe.qb.DocType("Agora Broadcast")
+	u = frappe.qb.DocType("User")
+	from frappe.query_builder.functions import Coalesce, NullIf
+
+	generation = (
+		Coalesce(NullIf(u.sync_registration_generation, 0), 1)
+		if frappe.db.has_column("User", "sync_registration_generation")
+		else 1
+	)
+	rows = (
+		frappe.qb.from_(p)
+		.join(r)
+		.on(p.broadcast == r.name)
+		.join(u)
+		.on(p.user == u.name)
+		.select(p.broadcast, Count(p.name).as_("viewers"))
+		.where(
+			p.broadcast.isin(room_ids)
+			& (p.active == 1)
+			& (p.user != r.host)
+			& (p.lease_until > now_datetime())
+			& (u.enabled == 1)
+			& (p.registration_generation == generation)
+		)
+		.groupby(p.broadcast)
+	).run(as_dict=True)
+	return {row.broadcast: cint(row.viewers) for row in rows}
 
 
 def prepare(project: str, user: str, title: str, request_id: str) -> Any:
