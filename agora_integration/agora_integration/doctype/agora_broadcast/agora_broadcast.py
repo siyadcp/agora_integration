@@ -18,5 +18,11 @@ class AgoraBroadcast(Document):
 			after_commit=True,
 		)
 		frappe.publish_realtime(
-			"list_update", {"doctype": self.doctype, "name": self.name}, after_commit=True
+			# Website users have no unrestricted doctype/list permission. This
+			# content-free hint reaches their existing authenticated socket room;
+			# policy-filtered discovery must refetch before displaying anything.
+			"list_update",
+			{"doctype": self.doctype, "name": "*"},
+			room="website",
+			after_commit=True,
 		)
