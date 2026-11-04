@@ -325,6 +325,7 @@ def activate(room: Any, user: str) -> None:
 	if user != room.host:
 		frappe.throw(_("Only the host can start the broadcast."), frappe.PermissionError)
 	_participant(room, user)
+	expire(room)
 	if visible_state(room) == "Ended":
 		frappe.throw(_("This broadcast has ended."))
 	if room.state == "Live":
