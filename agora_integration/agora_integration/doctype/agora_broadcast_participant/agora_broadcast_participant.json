@@ -1,7 +1,7 @@
 {
  "doctype": "DocType", "name": "Agora Broadcast Participant", "module": "Agora Integration", "autoname": "hash",
- "creation": "2026-11-04 01:00:00.000000", "modified": "2026-11-04 03:00:00.000000",
- "field_order": ["broadcast", "user", "device", "uid", "rtc_key", "participant_key", "registration_generation", "active", "last_seen", "lease_until"],
+ "creation": "2026-11-04 01:00:00.000000", "modified": "2026-11-04 09:30:00.000000",
+ "field_order": ["broadcast", "user", "device", "uid", "rtc_key", "participant_key", "registration_generation", "active", "last_seen", "lease_until", "attempt_id", "attempt_generation", "entry_state", "entry_deadline", "credential_expires_at", "credential_app_id"],
  "fields": [
   {"fieldname": "broadcast", "label": "Broadcast", "fieldtype": "Link", "options": "Agora Broadcast", "reqd": 1, "search_index": 1},
   {"fieldname": "user", "label": "User", "fieldtype": "Link", "options": "User", "reqd": 1, "search_index": 1},
@@ -12,7 +12,13 @@
   {"fieldname": "registration_generation", "label": "Registration generation", "fieldtype": "Int", "reqd": 1},
   {"fieldname": "active", "label": "Active", "fieldtype": "Check", "default": "1"},
   {"fieldname": "last_seen", "label": "Last seen", "fieldtype": "Datetime"},
-  {"fieldname": "lease_until", "label": "Media lease until", "fieldtype": "Datetime"}
+  {"fieldname": "lease_until", "label": "Media lease until", "fieldtype": "Datetime"},
+  {"fieldname": "attempt_id", "label": "Admission attempt", "fieldtype": "Data"},
+  {"fieldname": "attempt_generation", "label": "Attempt generation", "fieldtype": "Int", "default": "0"},
+  {"fieldname": "entry_state", "label": "Entry state", "fieldtype": "Select", "options": "\nPending\nConfirmed\nFailed"},
+  {"fieldname": "entry_deadline", "label": "Entry deadline", "fieldtype": "Datetime"},
+  {"fieldname": "credential_expires_at", "label": "Last credential expiry", "fieldtype": "Datetime"},
+  {"fieldname": "credential_app_id", "label": "Credential project", "fieldtype": "Data"}
  ],
  "permissions": [{"role": "System Manager", "read": 1}]
 }

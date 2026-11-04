@@ -4,8 +4,9 @@ import base64
 import struct
 import unittest
 import zlib
+from unittest.mock import patch
 
-from agora_integration.services.tokens import build_broadcast_token, build_rtc_token
+from agora_integration.services.tokens import build_broadcast_token, build_rtc_token, issue_broadcast_token
 
 
 def privileges(token: str) -> dict[int, int]:
@@ -19,6 +20,21 @@ def privileges(token: str) -> dict[int, int]:
 
 
 class BroadcastTokenTests(unittest.TestCase):
+	def test_issued_provisional_privilege_cannot_outlive_its_absolute_deadline(self) -> None:
+		class Settings:
+			app_id = "a" * 32
+
+			def get_password(self, field: str) -> str:
+				return "b" * 32
+
+		with (
+			patch("agora_integration.services.tokens.get_settings", return_value=Settings()),
+			patch("agora_integration.services.tokens.time.time", return_value=1700000000),
+		):
+			token = issue_broadcast_token("live_test", 17, publisher=False, ttl=30, not_after=1700000005)
+		self.assertEqual(token["expires_at"], 1700000005)
+		self.assertEqual(privileges(token["token"]), {1: 5})
+
 	def test_audience_only_receives_a_bound_short_join_privilege(self) -> None:
 		token = build_broadcast_token("a" * 32, "b" * 32, "live_test", 17, 30, publisher=False)
 		self.assertEqual(privileges(token), {1: 30})
