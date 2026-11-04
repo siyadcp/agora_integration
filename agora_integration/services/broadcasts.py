@@ -183,14 +183,15 @@ def _transition(room: Any, **values: Any) -> None:
 def expire(room: Any) -> None:
 	"""Caller holds the room lock. Missed heartbeats cannot mint a fresh window."""
 	state = visible_state(room)
-	if state == room.state:
+	if state == room.state and state != "Ended":
 		return
 	if state == "Reconnecting":
 		_transition(room, state=state, deadline=add_to_date(room.deadline, seconds=RECOVERY_SECONDS))
 	else:
-		_transition(room, state="Ended", ended_at=now_datetime())
+		if room.state != "Ended":
+			_transition(room, state="Ended", ended_at=now_datetime())
 		# A read can persist terminal recovery before the minute sweep. Retire all
-		# credentials here, or the sweep's active-room filter would miss them.
+		# credentials here, including omissions persisted by older end requests.
 		for row in frappe.qb.get_query(
 			"Agora Broadcast Participant",
 			filters={"broadcast": room.name, "active": 1},
@@ -491,10 +492,17 @@ def leave(room: Any, user: str, *, end: bool = False) -> None:
 			room.state, room.ended_at = "Ended", now_datetime()
 			room.version = cint(room.version) + 1
 			room.save(ignore_permissions=True)
-		for name in frappe.get_all(
-			"Agora Broadcast Participant", filters={"broadcast": room.name}, pluck="name"
-		):
-			_retire(room, frappe.get_doc("Agora Broadcast Participant", name, for_update=True), "Room ended")
+		# The room lock serializes joins, but does not refresh an earlier RR
+		# snapshot. Enumerate with a current read, not just current row loads.
+		for row in frappe.qb.get_query(
+			"Agora Broadcast Participant",
+			filters={"broadcast": room.name},
+			fields=["name"],
+			for_update=True,
+		).run(as_dict=True):
+			_retire(
+				room, frappe.get_doc("Agora Broadcast Participant", row.name, for_update=True), "Room ended"
+			)
 	else:
 		_retire(room, participant, "Viewer left")
 		_membership_changed(room)
@@ -511,7 +519,10 @@ def _retire(room: Any, participant: Any, reason: str) -> None:
 
 
 def expire_entry(room: Any, user: str) -> None:
-	name = frappe.db.get_value("Agora Broadcast Participant", {"broadcast": room.name, "user": user}, "name")
+	# Caller holds the room lock; the participant may postdate its RR snapshot.
+	name = frappe.db.get_value(
+		"Agora Broadcast Participant", {"broadcast": room.name, "user": user}, "name", for_update=True
+	)
 	if not name:
 		return
 	participant = frappe.get_doc("Agora Broadcast Participant", name, for_update=True)

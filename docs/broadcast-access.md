@@ -16,6 +16,10 @@ verification or authorization to enable paid admission.
 - Provider work is queued after commit. A minute recovery sweep expires pending
   entries and stale rooms and requeues pending/failed removal work. Credential
   expiry, not scheduler punctuality, supplies the provisional cutoff bound.
+- Terminal cleanup enumerates participants with current reads under the room
+  lock; an earlier REPEATABLE READ snapshot cannot hide a newly committed viewer.
+  Reads and the bounded sweep also repair active access left on already-ended
+  rooms, including confirmed viewers, without requiring another viewer callback.
 - `Pending` is durable intent; `Failed` means the provider outcome is unknown;
   `ProviderAccepted` records a positive-duration ban acknowledgement and rule ID,
   **not measured device disconnection**. `Expired` means the encoded credential

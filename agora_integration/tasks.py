@@ -59,8 +59,30 @@ def expire_broadcasts() -> None:
 	for name in names:
 		room = frappe.get_doc("Agora Broadcast", name, for_update=True)
 		broadcasts.expire(room)
-		for user in frappe.get_all(
-			"Agora Broadcast Participant", filters={"broadcast": name, "active": 1}, pluck="user"
-		):
-			broadcasts.expire_entry(room, user)
+		for row in frappe.qb.get_query(
+			"Agora Broadcast Participant",
+			filters={"broadcast": name, "active": 1},
+			fields=["user"],
+			for_update=True,
+		).run(as_dict=True):
+			broadcasts.expire_entry(room, row.user)
+		frappe.db.commit()
+	# Repair historical terminal omissions, including confirmed viewers which the
+	# pending-entry pass cannot find. Candidate discovery takes no participant
+	# locks before the room lock; expire() rechecks access with a current read.
+	p = frappe.qb.DocType("Agora Broadcast Participant")
+	r = frappe.qb.DocType("Agora Broadcast")
+	ended = (
+		frappe.qb.from_(r)
+		.join(p)
+		.on(p.broadcast == r.name)
+		.select(r.name)
+		.where((r.state == "Ended") & (p.active == 1))
+		.groupby(r.name)
+		.orderby(r.name)
+		.limit(500)
+	).run(as_dict=True)
+	for row in ended:
+		room = frappe.get_doc("Agora Broadcast", row.name, for_update=True)
+		broadcasts.expire(room)
 		frappe.db.commit()
