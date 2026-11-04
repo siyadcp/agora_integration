@@ -121,6 +121,18 @@ def load(
 	return room
 
 
+def authorized_participant(room: Any, user: str) -> Any:
+	"""Authorize nonmedia participation against the current device and lease.
+
+	The caller holds the room/user locks via load(lock=True). This does not
+	refresh media access or grant a new participation lease.
+	"""
+	participant = _participant(room, user)
+	if not participant.lease_until or get_datetime(participant.lease_until) <= now_datetime():
+		frappe.throw(_("Enter this broadcast again to participate."), frappe.PermissionError)
+	return participant
+
+
 def visible_state(room: Any) -> str:
 	return "Ended" if room.state != "Ended" and get_datetime(room.deadline) <= now_datetime() else room.state
 
