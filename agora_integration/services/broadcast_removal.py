@@ -20,7 +20,9 @@ def request_removal(room: Any, participant: Any, reason: str) -> None:
 	if not participant.credential_expires_at or not participant.credential_app_id:
 		return
 	key = f"{room.name}:{participant.uid}"
-	if frappe.db.exists("Agora Broadcast Removal", {"removal_key": key}):
+	# Room locking serializes retirement, but does not refresh an earlier RR
+	# snapshot. A duplicate end/retry must observe an already committed intent.
+	if frappe.db.get_value("Agora Broadcast Removal", {"removal_key": key}, "name", for_update=True):
 		return
 	doc = frappe.get_doc(
 		{

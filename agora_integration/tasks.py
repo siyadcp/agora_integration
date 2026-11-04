@@ -27,23 +27,7 @@ def expire_broadcast_access() -> None:
 	from agora_integration.services import broadcasts
 	from agora_integration.services.broadcast_removal import reconcile
 
-	for name in frappe.get_all(
-		"Agora Broadcast",
-		filters={"state": ["!=", "Ended"], "deadline": ["<=", frappe.utils.now_datetime()]},
-		pluck="name",
-		limit_page_length=500,
-		order_by="modified asc",
-	):
-		room = frappe.get_doc("Agora Broadcast", name, for_update=True)
-		for user in frappe.get_all(
-			"Agora Broadcast Participant", filters={"broadcast": name, "active": 1}, pluck="user"
-		):
-			broadcasts.expire_entry(room, user)
-		if broadcasts.visible_state(room) == "Ended":
-			room.state, room.ended_at = "Ended", frappe.utils.now_datetime()
-			room.version = frappe.utils.cint(room.version) + 1
-			room.save(ignore_permissions=True)
-		frappe.db.commit()
+	expire_broadcasts()
 	for row in frappe.get_all(
 		"Agora Broadcast Participant",
 		filters={
@@ -59,3 +43,24 @@ def expire_broadcast_access() -> None:
 		broadcasts.expire_entry(room, row.user)
 		frappe.db.commit()
 	reconcile()
+
+
+def expire_broadcasts() -> None:
+	"""Persist time-derived recovery/end even when every client has terminated."""
+	from agora_integration.services import broadcasts
+
+	names = frappe.get_all(
+		"Agora Broadcast",
+		filters={"state": ["in", broadcasts.ACTIVE], "deadline": ["<=", frappe.utils.now_datetime()]},
+		pluck="name",
+		order_by="deadline asc",
+		limit=500,
+	)
+	for name in names:
+		room = frappe.get_doc("Agora Broadcast", name, for_update=True)
+		broadcasts.expire(room)
+		for user in frappe.get_all(
+			"Agora Broadcast Participant", filters={"broadcast": name, "active": 1}, pluck="user"
+		):
+			broadcasts.expire_entry(room, user)
+		frappe.db.commit()
