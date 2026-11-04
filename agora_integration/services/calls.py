@@ -172,6 +172,10 @@ def start_call(
 		):
 			frappe.throw(_("Request UUID already belongs to another call."))
 		return serialize(call)
+	from agora_integration.services.broadcasts import require_no_broadcast
+
+	for user in (caller, recipient):
+		require_no_broadcast(user)
 	call = frappe.get_doc(
 		{
 			"doctype": "Agora Call Session",
@@ -245,6 +249,10 @@ def act(call_id: str, project: str, action: str, policy: Policy) -> dict[str, An
 	if call.state not in ACTIVE:
 		return serialize(call)
 	if action == "accept":
+		from agora_integration.services.broadcasts import require_no_broadcast
+
+		for participant_user in (call.caller, call.recipient):
+			require_no_broadcast(participant_user)
 		policy(call, "accept")
 		participant = next(row for row in call.participants if row.user == user)
 		device = _device()
