@@ -16,3 +16,20 @@ def expire_calls() -> None:
 		call = frappe.get_doc("Agora Call Session", name, for_update=True)
 		expire(call)
 		frappe.db.commit()
+
+
+def expire_broadcasts() -> None:
+	"""Persist time-derived recovery/end even when every client has terminated."""
+	from agora_integration.services import broadcasts
+
+	names = frappe.get_all(
+		"Agora Broadcast",
+		filters={"state": ["in", broadcasts.ACTIVE], "deadline": ["<=", frappe.utils.now_datetime()]},
+		pluck="name",
+		order_by="deadline asc",
+		limit=500,
+	)
+	for name in names:
+		room = frappe.get_doc("Agora Broadcast", name, for_update=True)
+		broadcasts.expire(room)
+		frappe.db.commit()
