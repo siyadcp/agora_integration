@@ -11,7 +11,8 @@ from frappe.utils import add_to_date, cint, get_datetime, now_datetime
 
 from agora_integration.services.tokens import get_settings, issue_broadcast_token
 
-ACTIVE = ("Preparing", "Live")
+ACTIVE = ("Preparing", "Live", "Reconnecting")
+RECOVERY_SECONDS = 60
 
 
 def current_device() -> str:
@@ -38,9 +39,17 @@ def require_no_broadcast(user: str, except_room: str | None = None) -> None:
 		fields=["broadcast"],
 		for_update=True,
 	).run(as_dict=True)
-	for row in rows:
-		room = frappe.get_doc("Agora Broadcast", row.broadcast, for_update=True)
-		if row.broadcast != except_room and visible_state(room) != "Ended":
+	# A recovering host still owns the room after its old media lease expires.
+	# Filter by active room state rather than scanning all historical participants.
+	hosted = frappe.qb.get_query(
+		"Agora Broadcast",
+		filters={"host": user, "state": ["in", ACTIVE]},
+		fields=["name"],
+		for_update=True,
+	).run(as_dict=True)
+	for room_id in sorted({row.broadcast for row in rows} | {row.name for row in hosted}):
+		room = frappe.get_doc("Agora Broadcast", room_id, for_update=True)
+		if room_id != except_room and visible_state(room) != "Ended":
 			frappe.throw(_("Finish your current Live session before starting another media session."))
 
 
@@ -118,11 +127,47 @@ def load(
 			):
 				frappe.throw(_("This account is unavailable."), frappe.PermissionError)
 		room = frappe.get_doc("Agora Broadcast", room_id, for_update=True)
+		expire(room)
 	return room
 
 
 def visible_state(room: Any) -> str:
-	return "Ended" if room.state != "Ended" and get_datetime(room.deadline) <= now_datetime() else room.state
+	if room.state == "Ended" or get_datetime(room.deadline) > now_datetime():
+		return room.state
+	if room.state == "Live" and add_to_date(room.deadline, seconds=RECOVERY_SECONDS) > now_datetime():
+		return "Reconnecting"
+	return "Ended"
+
+
+def _transition(room: Any, **values: Any) -> None:
+	# Recovery may be observed by a silent viewer. Never disclose that observer
+	# through room editor metadata or list_update actor payloads.
+	values["version"] = cint(room.version) + 1
+	room.update(values)
+	frappe.db.set_value("Agora Broadcast", room.name, values, update_modified=False)
+	room.notify_update()
+
+
+def expire(room: Any) -> None:
+	"""Caller holds the room lock. Missed heartbeats cannot mint a fresh window."""
+	state = visible_state(room)
+	if state == room.state:
+		return
+	if state == "Reconnecting":
+		_transition(room, state=state, deadline=add_to_date(room.deadline, seconds=RECOVERY_SECONDS))
+	else:
+		_transition(room, state="Ended", ended_at=now_datetime())
+
+
+def interrupt(room: Any, user: str) -> None:
+	if user != room.host:
+		frappe.throw(_("Only the host can interrupt this broadcast."), frappe.PermissionError)
+	_participant(room, user)
+	expire(room)
+	if room.state == "Live":
+		_transition(
+			room, state="Reconnecting", deadline=add_to_date(now_datetime(), seconds=RECOVERY_SECONDS)
+		)
 
 
 def serialize(room: Any, user: str) -> dict[str, Any]:
@@ -138,9 +183,17 @@ def serialize(room: Any, user: str) -> dict[str, Any]:
 		),
 		"title": room.title,
 		"state": state,
+		"accepting_admissions": state == "Live",
+		"recovery_deadline": str(
+			add_to_date(room.deadline, seconds=RECOVERY_SECONDS) if room.state == "Live" else room.deadline
+		)
+		if state == "Reconnecting"
+		else "",
 		"is_host": user == room.host,
 		"version": cint(room.version),
-		"viewer_count": viewer_counts([room.name]).get(room.name, 0) if state == "Live" else 0,
+		"viewer_count": viewer_counts([room.name]).get(room.name, 0)
+		if state in ("Live", "Reconnecting")
+		else 0,
 		"started_at": str(room.started_at or ""),
 		"ended_at": str(room.ended_at or ""),
 		"joining_fee": "0",
@@ -245,30 +298,39 @@ def _membership_changed(room: Any) -> None:
 
 
 def credentials(room: Any, user: str) -> dict[str, Any]:
+	expire(room)
 	if visible_state(room) == "Ended":
 		frappe.throw(_("This broadcast has ended."))
 	participant = _participant(room, user)
+	_no_call(user)
+	require_no_broadcast(user, room.name)
 	if room.state == "Preparing" and room.host != user:
 		frappe.throw(_("The host is not ready yet."))
 	participant.last_seen = now_datetime()
 	participant.lease_until = add_to_date(now_datetime(), seconds=90)
 	participant.save(ignore_permissions=True)
-	if user == room.host:
+	if user == room.host and room.state != "Reconnecting":
 		room.deadline = add_to_date(now_datetime(), seconds=90)
 		# Lease refresh is internal; do not fan out a room reload every heartbeat.
 		frappe.db.set_value("Agora Broadcast", room.name, "deadline", room.deadline, update_modified=False)
-	return issue_broadcast_token(room.channel, cint(participant.uid), publisher=user == room.host, ttl=90)
+	ttl = (
+		min(90, max(1, int((get_datetime(room.deadline) - now_datetime()).total_seconds())))
+		if room.state == "Reconnecting"
+		else 90
+	)
+	return issue_broadcast_token(room.channel, cint(participant.uid), publisher=user == room.host, ttl=ttl)
 
 
 def activate(room: Any, user: str) -> None:
 	if user != room.host:
 		frappe.throw(_("Only the host can start the broadcast."), frappe.PermissionError)
 	_participant(room, user)
+	expire(room)
 	if visible_state(room) == "Ended":
 		frappe.throw(_("This broadcast has ended."))
 	if room.state == "Live":
 		return
-	room.state, room.started_at = "Live", now_datetime()
+	room.state, room.started_at = "Live", room.started_at or now_datetime()
 	room.deadline = add_to_date(now_datetime(), seconds=60)
 	room.version = cint(room.version) + 1
 	room.save(ignore_permissions=True)
