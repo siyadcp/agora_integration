@@ -40,7 +40,14 @@ def build_rtc_token(
 
 
 def build_broadcast_token(
-	app_id: str, certificate: str, channel: str, uid: int, ttl: int, *, publisher: bool
+	app_id: str,
+	certificate: str,
+	channel: str,
+	uid: int,
+	ttl: int,
+	*,
+	publisher: bool,
+	issue_time: int | None = None,
 ) -> str:
 	"""Audience has join only; separate short leases leave private-call defaults intact."""
 	if not all(re.fullmatch(r"[a-fA-F0-9]{32}", value) for value in (app_id, certificate)):
@@ -54,7 +61,7 @@ def build_broadcast_token(
 		or not re.fullmatch(r"[a-zA-Z0-9_-]{1,63}", channel)
 	):
 		raise ValueError("Invalid broadcast token parameters")
-	return _encode(app_id, certificate, channel, uid, ttl, (1, 2, 3, 4) if publisher else (1,))
+	return _encode(app_id, certificate, channel, uid, ttl, (1, 2, 3, 4) if publisher else (1,), issue_time)
 
 
 def _encode(
@@ -71,7 +78,8 @@ def _encode(
 	nonce = salt if salt is not None else secrets.randbelow(99999999) + 1
 	key = hmac.new(struct.pack("<I", issued), certificate.encode(), hashlib.sha256).digest()
 	key = hmac.new(struct.pack("<I", nonce), key, hashlib.sha256).digest()
-	# Join privilege expires with the token, including for already-connected clients.
+	# Encode the join privilege bound too, not just the token lifetime. Actual
+	# already-connected client cutoff remains a provider/native launch check.
 	service = struct.pack("<HH", 1, len(privileges))
 	service += b"".join(struct.pack("<HI", privilege, ttl) for privilege in privileges)
 	service += _string(channel.encode()) + _string(str(uid).encode())
@@ -104,15 +112,29 @@ def issue_token(channel: str, uid: int) -> dict[str, Any]:
 	}
 
 
-def issue_broadcast_token(channel: str, uid: int, *, publisher: bool, ttl: int = 30) -> dict[str, Any]:
+def issue_broadcast_token(
+	channel: str, uid: int, *, publisher: bool, ttl: int = 30, not_after: int | None = None
+) -> dict[str, Any]:
 	settings = get_settings()
+	issued = int(time.time())
+	if not_after is not None:
+		ttl = min(ttl, not_after - issued)
+	if ttl < 1:
+		frappe.throw(_("This admission attempt has expired."))
 	return {
 		"app_id": settings.app_id,
 		"channel": channel,
 		"uid": uid,
 		"token": build_broadcast_token(
-			settings.app_id, settings.get_password("app_certificate"), channel, uid, ttl, publisher=publisher
+			settings.app_id,
+			settings.get_password("app_certificate"),
+			channel,
+			uid,
+			ttl,
+			publisher=publisher,
+			issue_time=issued,
 		),
-		"expires_at": int(time.time()) + ttl,
+		"expires_at": issued + ttl,
+		"ttl": ttl,
 		"publisher": publisher,
 	}
