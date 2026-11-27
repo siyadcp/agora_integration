@@ -7,7 +7,7 @@
   {"fieldname": "app_id", "label": "App ID", "fieldtype": "Data"},
   {"fieldname": "app_certificate", "label": "App Certificate", "fieldtype": "Password"},
   {"fieldname": "token_ttl", "label": "Token Lifetime (seconds)", "fieldtype": "Int", "default": "600", "reqd": 1},
-  {"fieldname": "ring_timeout", "label": "Ringing Timeout (seconds)", "fieldtype": "Int", "default": "45", "reqd": 1},
+  {"fieldname": "ring_timeout", "label": "Ringing Timeout (seconds)", "fieldtype": "Int", "default": "60", "reqd": 1},
   {"fieldname": "connect_timeout", "label": "Connection Timeout (seconds)", "fieldtype": "Int", "default": "45", "reqd": 1},
   {"fieldname": "heartbeat_timeout", "label": "Heartbeat Timeout (seconds)", "fieldtype": "Int", "default": "90", "reqd": 1},
   {"fieldname": "presence_stale_after", "label": "Presence Stale After (seconds)", "fieldtype": "Int", "default": "120", "reqd": 1},

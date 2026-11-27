@@ -41,7 +41,11 @@ def serialize(call: Any, display: dict[str, str] | None = None) -> dict[str, Any
 		display = {row.name: row.first_name for row in names}
 	end = call.ended_at or now_datetime()
 	visible_state = call.state
-	if call.state in ("Ringing", "Connecting") and get_datetime(call.deadline) <= now_datetime():
+	invitation = call.state in ("Ringing", "Connecting")
+	expires_in = 0
+	if invitation and call.deadline:
+		expires_in = max(0, int(time_diff_in_seconds(call.deadline, now_datetime())))
+	if invitation and get_datetime(call.deadline) <= now_datetime():
 		# Do not offer stale invitations while waiting for the scheduled persisted expiry.
 		visible_state = "Timed Out" if call.state == "Ringing" else "Failed"
 	return {
@@ -55,6 +59,9 @@ def serialize(call: Any, display: dict[str, str] | None = None) -> dict[str, Any
 		"recipient_name": display.get(call.recipient, ""),
 		"incoming": user == call.recipient,
 		"expires_at": str(call.deadline or ""),
+		# Seconds left before this invitation ends, so a client can schedule a
+		# local timeout without depending on the site's timezone.
+		"expires_in": expires_in,
 		"can_join": any(row.user == user and row.device == _device() for row in call.participants),
 		"started_at": str(call.started_at or ""),
 		"ended_at": str(call.ended_at or ""),
@@ -189,7 +196,7 @@ def start_call(
 			"channel": f"call_{uuid4().hex}",
 			"state": "Ringing",
 			"version": 1,
-			"deadline": add_to_date(now_datetime(), seconds=int(settings.ring_timeout or 45)),
+			"deadline": add_to_date(now_datetime(), seconds=int(settings.ring_timeout or 60)),
 		}
 	)
 	policy(call, "start")
@@ -219,8 +226,16 @@ def start_call(
 
 
 def get_call(call_id: str, project: str) -> dict[str, Any]:
-	# Read operations do not mutate state; scheduler/actions expire sessions.
-	return serialize(_load(call_id, project, lock=False))
+	"""Return one session, persisting an invitation that is past its deadline.
+
+	The minute scheduler is the safety net. Polling must also persist expiry, so
+	a lost realtime event or a paused scheduler cannot leave a call ringing (and
+	its coin reservation held) indefinitely.
+	"""
+	call = _load(call_id, project, lock=False)
+	if call.state in ACTIVE and _expiration(call) is not None:
+		call = _load(call_id, project)
+	return serialize(call)
 
 
 def get_active_call(project: str) -> dict[str, Any] | None:

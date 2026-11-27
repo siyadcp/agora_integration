@@ -258,6 +258,26 @@ class CallLifecycleTests(unittest.TestCase):
 		result = calls.act(call["id"], "test_calls", "accept", lambda call, action: None)
 		self.assertEqual(result["state"], "Timed Out")
 
+	def test_polling_an_expired_invitation_persists_the_timeout(self) -> None:
+		"""A client poll must not leave a dead invitation ringing in the database."""
+		call = self.start()
+		frappe.db.set_value(
+			"Agora Call Session", call["id"], "deadline", add_to_date(now_datetime(), seconds=-1)
+		)
+		result = calls.get_call(call["id"], "test_calls")
+		self.assertEqual(result["state"], "Timed Out")
+		self.assertEqual(result["expires_in"], 0)
+		self.assertEqual(
+			frappe.db.get_value("Agora Call Session", call["id"], "state"), "Timed Out"
+		)
+		self.assertIsNone(calls.get_active_call("test_calls"))
+
+	def test_invitation_serializes_remaining_seconds(self) -> None:
+		call = self.start()
+		result = calls.get_call(call["id"], "test_calls")
+		self.assertEqual(result["state"], "Ringing")
+		self.assertGreater(result["expires_in"], 0)
+
 	def test_ringing_and_terminal_calls_cannot_issue_token(self) -> None:
 		call = self.start()
 		with self.assertRaises(frappe.ValidationError):
