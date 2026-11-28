@@ -16,7 +16,7 @@ from agora_integration.services.voip_devices import VOIP_REGISTRATION_DOCTYPE, r
 
 REGISTRATION_DOCTYPE = "Flutter Device Credential"
 IOS_CALL_CATEGORY = "agora_call"
-PUSH_TTL_SECONDS = 45
+PUSH_TTL_SECONDS = 90
 DEDUPE_SECONDS = 60
 DISMISS_DEDUPE_SECONDS = 30
 #: States after which the recipient's ringing UI must be dismissed.
@@ -121,7 +121,7 @@ def _deliver(
 	event: str = "incoming_call",
 ) -> None:
 	caller_name = frappe.db.get_value("User", session.caller, "first_name") or "Someone"
-	messaging.send_each_for_multicast(
+	response = messaging.send_each_for_multicast(
 		messaging.MulticastMessage(
 			tokens=tokens,
 			data={
@@ -152,6 +152,43 @@ def _deliver(
 			),
 		),
 		app=firebase_app,
+	)
+	_handle_responses(session, tokens, response)
+
+
+def _handle_responses(session: Any, tokens: list[str], response: Any) -> None:
+	"""Log per-token delivery failures and disable permanently dead devices."""
+	results = getattr(response, "responses", None)
+	if not isinstance(results, (list, tuple)):
+		return
+	failed: list[tuple[str, str]] = []
+	for token, result in zip(tokens, results, strict=False):
+		if getattr(result, "success", True):
+			continue
+		exception = getattr(result, "exception", None)
+		code = str(getattr(exception, "code", "") or type(exception).__name__)
+		failed.append((token, code))
+	if not failed:
+		return
+	dead = [token for token, code in failed if code in {"NOT_FOUND", "UNREGISTERED", "INVALID_ARGUMENT"}]
+	disabled = 0
+	if dead:
+		rows = frappe.get_all(
+			REGISTRATION_DOCTYPE,
+			filters={"fcm_token": ["in", dead], "app": session.project},
+			fields=["name"],
+		)
+		for row in rows:
+			frappe.db.set_value(
+				REGISTRATION_DOCTYPE, row.name, "push_enabled", 0, update_modified=False
+			)
+		disabled = len(rows)
+	frappe.log_error(
+		title="agora_integration.push",
+		message=(
+			f"Call push {session.name}: {len(failed)} of {len(tokens)} token(s) failed "
+			f"({', '.join(sorted({code for _, code in failed}))}); disabled {disabled} device(s)."
+		),
 	)
 
 

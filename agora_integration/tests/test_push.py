@@ -41,6 +41,29 @@ class RingPushDeliveryTests(TestCase):
 			push._deliver(messaging, "firebase-app", _session("Ended"), ["tok1"], event="call_ended")
 		self.assertEqual(messaging.MulticastMessage.call_args.kwargs["data"]["type"], "call_ended")
 
+	def test_deliver_disables_unregistered_tokens(self) -> None:
+		class UnregisteredError(Exception):
+			code = "NOT_FOUND"
+
+		messaging = Mock()
+		messaging.send_each_for_multicast.return_value = SimpleNamespace(
+			responses=[SimpleNamespace(success=False, exception=UnregisteredError())]
+		)
+		rows = [SimpleNamespace(name="DEV-1")]
+		with (
+			patch.object(push.frappe.db, "get_value", return_value="Member"),
+			patch.object(push.frappe, "get_all", return_value=rows) as get_all,
+			patch.object(push.frappe.db, "set_value") as set_value,
+			patch.object(push.frappe, "log_error") as log_error,
+		):
+			push._deliver(messaging, "firebase-app", _session(), ["tok1"])
+
+		get_all.assert_called_once()
+		set_value.assert_called_once_with(
+			push.REGISTRATION_DOCTYPE, "DEV-1", "push_enabled", 0, update_modified=False
+		)
+		log_error.assert_called_once()
+
 	def test_deliver_voip_disables_dead_tokens(self) -> None:
 		rows = [
 			SimpleNamespace(name="DEV-1", voip_token="v1"),

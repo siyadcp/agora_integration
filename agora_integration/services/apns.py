@@ -16,7 +16,7 @@ import frappe
 
 APNS_PRODUCTION_HOST = "https://api.push.apple.com"
 APNS_SANDBOX_HOST = "https://api.development.push.apple.com"
-VOIP_PUSH_TTL_SECONDS = 45
+VOIP_PUSH_TTL_SECONDS = 90
 
 
 def _settings() -> Any:

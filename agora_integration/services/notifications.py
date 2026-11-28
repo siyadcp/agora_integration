@@ -2,7 +2,6 @@ from typing import Any
 
 import frappe
 
-from agora_integration.services.presence import get_presence
 from agora_integration.services.push import (
 	DISMISS_STATES,
 	enqueue_call_dismiss,
@@ -20,12 +19,11 @@ def notify(call: Any) -> None:
 	}
 	for user in (call.caller, call.recipient):
 		frappe.publish_realtime("agora_call_updated", payload, user=user, after_commit=True)
-	# Skip pushes while the recipient is actively using the app: the realtime
-	# event above already drives the in-app ringing UI. Background and offline
-	# recipients get a push so the OS can ring (or stop ringing).
+	# The data push mirrors the realtime event. Presence is only advisory: a
+	# killed app or a dead socket can leave the last report as Foreground, and
+	# suppressing the push then loses the call entirely. Foreground clients
+	# ignore the native ring and simply refresh from the data event.
 	if call.state == "Ringing":
-		if get_presence(call.recipient) != "Foreground":
-			enqueue_ring_push(call)
+		enqueue_ring_push(call)
 	elif call.state in DISMISS_STATES:
-		if get_presence(call.recipient) != "Foreground":
-			enqueue_call_dismiss(call)
+		enqueue_call_dismiss(call)
